@@ -30,6 +30,7 @@ class IterativeLearningMPC(Controller):
         self._tick_max = len(self._waypoints_pos) - 1 - self._N
         self._finished = False
         self._past_trajectories = []  # Store previous successful trajectories
+        self._current_log = []  # Store current trajectory
 
     def _generate_trajectory(self):
         """Generate cubic spline trajectory from predefined waypoints."""
@@ -48,7 +49,7 @@ class IterativeLearningMPC(Controller):
             ]
         )
 
-        des_completion_time = 8
+        des_completion_time = 10.0
         ts = np.linspace(0, des_completion_time, np.shape(waypoints)[0])
 
         cs_x = CubicSpline(ts, waypoints[:, 0])
@@ -78,6 +79,9 @@ class IterativeLearningMPC(Controller):
         # Convert quaternion to RPY
         obs["rpy"] = R.from_quat(obs["quat"]).as_euler("xyz")
         x0 = np.concatenate((obs["pos"], obs["vel"], obs["rpy"]))
+        
+        # Log current state
+        self._current_log.append(x0)
 
         # Set initial state
         self._acados_ocp_solver.set(0, "lbx", x0)
@@ -93,13 +97,17 @@ class IterativeLearningMPC(Controller):
 
             # Incorporate safe set / past trajectory penalty (ILMPC)
             if self._past_trajectories:
-                yref[j, 0:3] += 0.1 * (self._past_trajectories[-1][idx, 0:3] - yref[j, 0:3])
+                past_traj = self._past_trajectories[-1]
+                # Ensure idx is within bounds of the past trajectory
+                if idx < len(past_traj):
+                    yref[j, 0:3] += 0.1 * (past_traj[idx, 0:3] - yref[j, 0:3])
 
             self._acados_ocp_solver.set(j, "yref", yref[j])
 
         yref_e = np.zeros((self._ny_e))
-        yref_e[0:3] = self._waypoints_pos[min(i + self._N, len(self._waypoints_pos) - 1)]
-        yref_e[5] = self._waypoints_yaw[min(i + self._N, len(self._waypoints_yaw) - 1)]
+        idx_e = min(i + self._N, len(self._waypoints_pos) - 1)
+        yref_e[0:3] = self._waypoints_pos[idx_e]
+        yref_e[5] = self._waypoints_yaw[idx_e]
         self._acados_ocp_solver.set(self._N, "yref", yref_e)
 
         # Solve OCP
@@ -116,7 +124,12 @@ class IterativeLearningMPC(Controller):
 
     def episode_callback(self):
         """Store successful trajectory for ILMPC iteration."""
-        trajectory = np.zeros((len(self._waypoints_pos), self._nx))
-        # TODO: fill trajectory from logged states
-        self._past_trajectories.append(trajectory)
+        if self._current_log:
+            trajectory = np.array(self._current_log)
+            self._past_trajectories.append(trajectory)
+            
+    def episode_reset(self):
+        """Reset controller state for next episode."""
         self._tick = 0
+        self._finished = False
+        self._current_log = []
